@@ -44,7 +44,14 @@ async function CREATEposts() {
       FOREIGN KEY(user_id) REFERENCES users(id)
     )`);
 }
-
+const adminUser = await db.get(`SELECT * FROM users WHERE fullname = 'admin'`);
+    
+    if (!adminUser) {
+        // יצירת משתמש admin עם הרשאות ניהול
+        await db.run(`INSERT INTO users (fullname, password, is_admin) VALUES (?, ?, ?)`, ['admin', '1234', 1]);
+        console.log("Admin user created.");
+    }
+}
 // ניהול session
 app.use(session({
     secret: 'your_secret_key',
