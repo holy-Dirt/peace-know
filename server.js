@@ -7,45 +7,38 @@ const session = require('express-session');
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 
-let dbPromise;
+const dbPromise = open({
+    filename: path.join(__dirname, 'database.db'),
+    driver: sqlite3.Database
+});
 
-// אתחול בסיס הנתונים
-async function initializeDB() {
-    dbPromise = open({
-        filename: path.join(__dirname, 'database.db'),
-        driver: sqlite3.Database
-    });
-
+// יצירת טבלאות אם לא קיימות
+(async () => {
     const db = await dbPromise;
 
     await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      fullname TEXT NOT NULL UNIQUE,
-      password TEXT NOT NULL,
-      is_admin INTEGER DEFAULT 0
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fullname TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        is_admin INTEGER DEFAULT 0
     )`);
 
     await db.exec(`
     CREATE TABLE IF NOT EXISTS posts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      post TEXT NOT NULL,
-      FOREIGN KEY(user_id) REFERENCES users(id)
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        post TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
     )`);
 
-    // בדיקה אם משתמש admin קיים, אם לא – יצירה
+    // יצירת משתמש admin אם לא קיים
     const adminUser = await db.get(`SELECT * FROM users WHERE fullname = 'admin'`);
     if (!adminUser) {
         await db.run(`INSERT INTO users (fullname, password, is_admin) VALUES (?, ?, ?)`, ['admin', '1234', 1]);
         console.log("Admin user created.");
     }
-
-    console.log("Database initialized successfully.");
-}
-
-// הפעלת אתחול בסיס הנתונים
-initializeDB().catch(err => console.error("DB Initialization Error:", err));
+})();
 
 // ניהול session
 app.use(session({
@@ -55,12 +48,6 @@ app.use(session({
 }));
 
 app.use(express.static('public'));
-
-// Middleware לחיבור לבסיס הנתונים
-app.use(async (req, res, next) => {
-    req.db = await dbPromise;
-    next();
-});
 
 // דפי ניווט
 app.get('/', (req, res) => res.sendFile(path.resolve('public/index.html')));
@@ -72,11 +59,11 @@ app.get('/aboutus', (req, res) => res.sendFile(path.resolve('public/aboutus.html
 app.post('/register', async (req, res) => {
     const { fullname, password } = req.body;
     try {
-        const db = await req.db;
+        const db = await dbPromise;
         await db.run(`INSERT INTO users (fullname, password) VALUES (?, ?)`, [fullname, password]);
         res.redirect('/login');
     } catch (error) {
-        console.error("Registration Error:", error);
+        console.error(error);
         res.status(500).send('Error registering user');
     }
 });
@@ -84,7 +71,7 @@ app.post('/register', async (req, res) => {
 // התחברות
 app.post('/login', async (req, res) => {
     try {
-        const db = await req.db;
+        const db = await dbPromise;
         const { fullname, password } = req.body;
         const user = await db.get(`SELECT * FROM users WHERE fullname=? AND password=?`, [fullname, password]);
 
@@ -95,7 +82,7 @@ app.post('/login', async (req, res) => {
             res.status(401).send('User does not exist');
         }
     } catch (error) {
-        console.error("Login Error:", error);
+        console.log(error);
         res.status(500).sendFile(path.resolve('public/register.html'));
     }
 });
@@ -103,7 +90,7 @@ app.post('/login', async (req, res) => {
 // יצירת פוסט
 app.post('/createpost', async (req, res) => {
     const { posting } = req.body;
-    const db = await req.db;
+    const db = await dbPromise;
 
     if (!req.session.user) {
         return res.status(401).send('You must be logged in to post.');
@@ -117,9 +104,9 @@ app.post('/createpost', async (req, res) => {
     res.redirect('/loggedin');
 });
 
-// דף הפוסטים - כולל מחיקה ועריכה
+// דף הפוסטים
 app.get('/loggedin', async (req, res) => {
-    const db = await req.db;
+    const db = await dbPromise;
     const posts = await db.all(`
         SELECT posts.id, posts.post, users.fullname, posts.user_id
         FROM posts 
@@ -171,9 +158,13 @@ app.get('/loggedin', async (req, res) => {
     res.send(html);
 });
 
-// מחיקת פוסט
+// נתיב מחיקת פוסט
 app.post('/deletepost/:id', async (req, res) => {
-    const db = await req.db;
+    if (!req.session.user) {
+        return res.status(401).send('You must be logged in to delete a post.');
+    }
+
+    const db = await dbPromise;
     const post = await db.get(`SELECT * FROM posts WHERE id = ?`, [req.params.id]);
 
     if (!post) {
@@ -189,9 +180,12 @@ app.post('/deletepost/:id', async (req, res) => {
 });
 
 // עריכת פוסט
-app.post('/editpost/:id', async (req, res) => {
-    const db = await req.db;
-    const { newPost } = req.body;
+app.get('/editpost/:id', async (req, res) => {
+    if (!req.session.user) {
+        return res.status(401).send('You must be logged in to edit a post.');
+    }
+
+    const db = await dbPromise;
     const post = await db.get(`SELECT * FROM posts WHERE id = ?`, [req.params.id]);
 
     if (!post) {
@@ -202,6 +196,27 @@ app.post('/editpost/:id', async (req, res) => {
         return res.status(403).send('You are not allowed to edit this post.');
     }
 
+    res.send(`
+    <html>
+      <head>
+        <title>Edit Post</title>
+        <link rel="stylesheet" href="/style.css">
+      </head>
+      <body>
+        <h2>Edit Your Post</h2>
+        <form action="/editpost/${post.id}" method="POST">
+            <textarea name="newPost" rows="4" cols="50">${post.post}</textarea>
+            <br>
+            <button type="submit">Save Changes</button>
+        </form>
+      </body>
+    </html>`);
+});
+
+app.post('/editpost/:id', async (req, res) => {
+    const db = await dbPromise;
+    const { newPost } = req.body;
+
     await db.run(`UPDATE posts SET post = ? WHERE id = ?`, [newPost, req.params.id]);
     res.redirect('/loggedin');
 });
@@ -211,7 +226,7 @@ app.get('/logout', (req, res) => {
     req.session.destroy(() => res.redirect('/'));
 });
 
-// הפעלת השרת
 app.listen(3001, () => {
     console.log('Server is running on port 3001');
 });
+
